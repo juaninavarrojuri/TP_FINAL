@@ -1,0 +1,329 @@
+
+    LIST P=16F887
+    #INCLUDE <P16F887.INC>
+
+    __CONFIG _CONFIG1, _FOSC_XT & _WDTE_OFF & _PWRTE_OFF & _MCLRE_ON & _CP_OFF & _CPD_OFF & _BOREN_ON & _IESO_ON & _FCMEN_ON & _LVP_OFF
+    __CONFIG _CONFIG2, _BOR4V_BOR40V & _WRT_OFF
+
+UMBRAL_HUMEDAD  EQU .60
+
+    CBLOCK 0x70
+        W_TEMP
+        STATUS_TEMP
+        FSR_TEMP
+    ENDC
+
+    CBLOCK 0x20
+        INDEX
+        NUM0
+        NUM1
+        NUM2
+        NUM3
+        VALOR_ADC
+        HUMEDAD_PCT
+        REG_H
+        REG_L
+        CONTADOR
+        UNIDADES
+        DECENAS
+        CENTENAS
+        TX_ENABLE
+        RETARDO_TX
+    ENDC
+
+    ORG 0x00
+    GOTO INICIO
+
+    ORG 0x04
+    GOTO ISR
+
+ISR
+    MOVWF   W_TEMP
+    SWAPF   STATUS, W
+    MOVWF   STATUS_TEMP
+    SWAPF   FSR, W
+    MOVWF   FSR_TEMP
+    
+    BANKSEL PORTA
+
+    BTFSC   INTCON, INTF
+    GOTO    ISR_EXTERNA
+    
+    BTFSC   INTCON, T0IF
+    GOTO    ISR_TIMER0
+    
+    GOTO    SALIR_ISR
+
+ISR_EXTERNA
+    MOVLW   b'00000001'
+    XORWF   TX_ENABLE, F
+    BCF     INTCON, INTF
+    GOTO    SALIR_ISR
+
+ISR_TIMER0
+    MOVLW   .237
+    MOVWF   TMR0
+    
+    CLRF    PORTC
+    NOP
+    
+    MOVLW   NUM0
+    ADDWF   INDEX, W
+    MOVWF   FSR 
+    MOVF    INDF, W         
+    CALL    TABLA_7SEG
+    MOVWF   PORTD
+    
+    MOVF    INDEX, W
+    CALL    TABLA_TRANSISTORES
+    MOVWF   PORTC
+    
+    INCF    INDEX, F
+    MOVF    INDEX, W
+    XORLW   .4
+    BTFSC   STATUS, Z
+    CLRF    INDEX
+    
+    BCF     INTCON, T0IF
+    GOTO    SALIR_ISR
+
+SALIR_ISR
+    SWAPF   FSR_TEMP, W
+    MOVWF   FSR
+    SWAPF   STATUS_TEMP, W
+    MOVWF   STATUS
+    SWAPF   W_TEMP, F
+    SWAPF   W_TEMP, W
+    RETFIE
+
+INICIO
+    CLRF    INDEX
+    CLRF    PORTC
+    CLRF    PORTD
+    CLRF    PORTA
+    MOVLW   .1
+    MOVWF   TX_ENABLE
+    MOVLW   .50
+    MOVWF   RETARDO_TX
+    
+    BANKSEL ANSEL
+    CLRF    ANSEL
+    BSF     ANSEL, 0
+    CLRF    ANSELH
+    
+    BANKSEL TRISA
+    BSF     TRISA, 0
+    BCF     TRISA, 1
+    
+    MOVLW   b'10000000'
+    MOVWF   TRISC
+    CLRF    TRISD
+    
+    BSF     TRISB, 0
+    BANKSEL OPTION_REG
+    BCF     OPTION_REG, 7
+    BCF     OPTION_REG, 6
+    BANKSEL WPUB
+    BSF     WPUB, 0
+    
+    BANKSEL ADCON1
+    CLRF    ADCON1
+    BANKSEL ADCON0
+    MOVLW   b'11000001'
+    MOVWF   ADCON0
+    
+    BANKSEL TXSTA
+    MOVLW   b'00100100'
+    MOVWF   TXSTA
+    MOVLW   .25
+    MOVWF   SPBRG
+    BANKSEL RCSTA
+    MOVLW   b'10010000'
+    MOVWF   RCSTA
+    
+    BANKSEL OPTION_REG
+    BCF     OPTION_REG, 5
+    BCF     OPTION_REG, 3
+    BSF     OPTION_REG, 2
+    BSF     OPTION_REG, 1
+    BSF     OPTION_REG, 0
+    
+    BANKSEL INTCON
+    BSF     INTCON, GIE
+    BSF     INTCON, TMR0IE
+    BSF     INTCON, INTE
+
+    BANKSEL PORTA
+    
+LOOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+
+    BSF     ADCON0, GO
+ESPERAR_ADC
+    BTFSC   ADCON0, GO
+    GOTO    ESPERAR_ADC
+    
+    MOVF    ADRESH, W
+    
+    SUBLW   .255
+    
+    MOVWF   VALOR_ADC
+
+    CALL    ESCALAR_PORCENTAJE
+
+    CALL    BIN_A_BCD
+    
+    MOVF    HUMEDAD_PCT, W
+    SUBLW   UMBRAL_HUMEDAD
+    BTFSC   STATUS, C
+    GOTO    ACTIVAR_RELE
+    BCF     PORTA, 1
+    GOTO    MANEJO_UART
+
+ACTIVAR_RELE
+    BSF     PORTA, 1
+
+MANEJO_UART
+    BANKSEL RCSTA
+    BTFSS   RCSTA, OERR
+    GOTO    CHECK_RX
+    BCF     RCSTA, CREN
+    BSF     RCSTA, CREN
+
+CHECK_RX
+    BANKSEL PORTA
+    BTFSS   PIR1, RCIF
+    GOTO    TRANSMITIR_DATOS
+    MOVF    RCREG, W
+
+TRANSMITIR_DATOS
+    BTFSS   TX_ENABLE, 0
+    GOTO    FIN_BUCLE
+    
+    DECFSZ  RETARDO_TX, F
+    GOTO    FIN_BUCLE
+    MOVLW   .100
+    MOVWF   RETARDO_TX
+
+    MOVLW   'H'
+    CALL    ENVIAR_UART
+    
+    MOVF    CENTENAS, W
+    ADDLW   0x30
+    CALL    ENVIAR_UART
+    
+    MOVF    DECENAS, W
+    ADDLW   0x30
+    CALL    ENVIAR_UART
+    
+    MOVF    UNIDADES, W
+    ADDLW   0x30
+    CALL    ENVIAR_UART
+    
+    MOVLW   0x0D
+    CALL    ENVIAR_UART
+    MOVLW   0x0A
+    CALL    ENVIAR_UART
+    
+FIN_BUCLE
+    GOTO    LOOP
+
+ESCALAR_PORCENTAJE
+    CLRF    REG_H
+    CLRF    REG_L
+    MOVLW   .100
+    MOVWF   CONTADOR
+MULT_LOOP
+    MOVF    VALOR_ADC, W
+    ADDWF   REG_L, F
+    BTFSC   STATUS, C
+    INCF    REG_H, F
+    DECFSZ  CONTADOR, F
+    GOTO    MULT_LOOP
+
+    MOVF    REG_H, W
+    MOVWF   HUMEDAD_PCT
+    BTFSS   STATUS, Z
+    INCF    HUMEDAD_PCT, F
+    
+    MOVF    HUMEDAD_PCT, W
+    SUBLW   .100
+    BTFSS   STATUS, C
+    GOTO    FORZAR_100
+    RETURN
+FORZAR_100
+    MOVLW   .100
+    MOVWF   HUMEDAD_PCT
+    RETURN
+
+BIN_A_BCD
+    CLRF    CENTENAS
+    CLRF    DECENAS
+    MOVF    HUMEDAD_PCT, W
+    MOVWF   UNIDADES
+L_CIEN
+    MOVLW   .100
+    SUBWF   UNIDADES, W
+    BTFSS   STATUS, C
+    GOTO    L_DIEZ
+    MOVWF   UNIDADES
+    INCF    CENTENAS, F
+    GOTO    L_CIEN
+L_DIEZ
+    MOVLW   .10
+    SUBWF   UNIDADES, W
+    BTFSS   STATUS, C
+    GOTO    FIN_BCD
+    MOVWF   UNIDADES
+    INCF    DECENAS, F
+    GOTO    L_DIEZ
+FIN_BCD
+    MOVF    UNIDADES, W
+    MOVWF   NUM0
+    MOVF    DECENAS, W
+    MOVWF   NUM1
+    MOVF    CENTENAS, W
+    MOVWF   NUM2
+    MOVLW   .10             
+    MOVWF   NUM3
+    RETURN
+
+ENVIAR_UART
+    BANKSEL PIR1
+ESPERA_TX
+    BTFSS   PIR1, TXIF
+    GOTO    ESPERA_TX
+    BANKSEL TXREG
+    MOVWF   TXREG
+    BANKSEL PORTA
+    RETURN
+
+TABLA_TRANSISTORES
+    ADDWF   PCL, F
+    RETLW   b'00000001'
+    RETLW   b'00000010'
+    RETLW   b'00000100'
+    RETLW   b'00001000'
+
+TABLA_7SEG
+    ADDWF   PCL, F
+    RETLW   0x3F
+    RETLW   0x06
+    RETLW   0x5B
+    RETLW   0x4F
+    RETLW   0x66
+    RETLW   0x6D
+    RETLW   0x7D
+    RETLW   0x07
+    RETLW   0x7F
+    RETLW   0x6F
+    RETLW   B'01110110'
+    
+    END
+
+
+    
